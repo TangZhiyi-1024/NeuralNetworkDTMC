@@ -1,29 +1,29 @@
-# dtmc_eval_both.py
-# 同时评传统频数 DTMC 与 NN+高斯 DTMC（同一状态空间），输出 NLL/Brier/Top-k/RMSE/MAE/熵/ECE
+# Simultaneously evaluate traditional frequency DTMC and NN+Gaussian DTMC (same state space)
+# outputting NLL/Brier/Top-k/RMSE/MAE/Entropy/ECE
 
 import os, numpy as np
 from scipy.stats import norm
 
-# ===== 配置 =====
 FILE_PATH     = r"C:\Users\LENOVO\Desktop\project\sequence_complete.txt"
 
-# 传统法：从你的 trandition.py 导入（名字就是你之前放的）
-from tradition import dtmc_from_sequence   # 需返回 (P_trad, states_trad)
+from tradition import dtmc_from_sequence   # return (P_trad, states_trad)
 
-# NN 模型与 scaler
+# NN and scaler
 MODEL_PATH    = "sequence_model.h5"
 X_SCALER_PATH = "x_scaler.pkl"
 Y_SCALER_PATH = "y_scaler.pkl"
 
-VAL_RATIO     = 0.10        # 末尾10%为验证
-N_BINS        = 128         # 传统法分箱个数（建议 64~256）
-QUANTILE_BINS = True        # True=分位数分箱（更均衡）
-ALPHA_SMOOTH  = 1.0         # 传统法拉普拉斯平滑（每条出边+α）
+VAL_RATIO     = 0.10        # validation: 10%
+N_BINS        = 128         # Number of bins for traditional methods
+QUANTILE_BINS = True
+ALPHA_SMOOTH  = 1.0
 TOPK_LIST     = [1, 3, 5]
 ECE_BINS      = 10
 EPS           = 1e-12
 BATCH_PRED    = 4096
-# ==============
+TOL = 100.0   # <=100 视为识别正确
+
+
 
 def load_sequence(path):
     xs=[]
@@ -32,13 +32,13 @@ def load_sequence(path):
             s=line.strip()
             if s: xs.append(float(s))
     xs=np.asarray(xs,dtype=np.float64)
-    if xs.size<3: raise ValueError("序列太短")
+    if xs.size<3: raise ValueError("sequence too short")
     return xs
 
 def load_model_and_scalers():
     from tensorflow.keras.models import load_model
     import joblib
-    model = load_model(MODEL_PATH, compile=False)   # 预测用，不反序列化 'mse'
+    model = load_model(MODEL_PATH, compile=False)
     xsc = joblib.load(X_SCALER_PATH)
     ysc = joblib.load(Y_SCALER_PATH)
     return model, xsc, ysc
@@ -63,7 +63,7 @@ def batched_predict(model, X, batch=BATCH_PRED):
     return np.vstack(outs)
 
 def build_gauss_on_states(model, xsc, ysc, seq_train, states_centers, edges, sigma_floor=1e-6):
-    # 全局残差
+    # Global residual
     actuals, preds = [], []
     for t in range(len(seq_train)-1):
         xi = xsc.transform([[seq_train[t]]])
@@ -75,13 +75,13 @@ def build_gauss_on_states(model, xsc, ysc, seq_train, states_centers, edges, sig
     r_std  = float(np.std(resid, ddof=1))
     sigma  = max(r_std, sigma_floor)
 
-    # 逐中心预测
+    # Center-by-center prediction
     xs    = xsc.transform(np.asarray(states_centers).reshape(-1,1))
     yhat_s= batched_predict(model, xs, batch=BATCH_PRED).reshape(-1,1)
     yhat  = ysc.inverse_transform(yhat_s).reshape(-1)
     mu_vec= yhat + r_mean
 
-    # CDF 差构建行
+    # CDF
     S = len(states_centers)
     P = np.zeros((S,S), dtype=np.float64)
     eL, eR = edges[:-1], edges[1:]
@@ -105,11 +105,12 @@ def map_to_idx_by_nearest(states, values):
     states = np.asarray(states); values = np.asarray(values)
     return np.abs(values.reshape(-1,1)-states.reshape(1,-1)).argmin(axis=1)
 
-def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5), ece_bins=10, eps=1e-12):
+def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5),
+                 ece_bins=10, eps=1e-12, tol=100.0):
     X, Y = seq[:-1], seq[1:]
     split = int(len(X)*(1.0-val_ratio))
     Xv, Yv = X[split:], Y[split:]
-    if len(Xv)==0: raise ValueError("验证集为空，请调小 VAL_RATIO")
+    if len(Xv)==0: raise ValueError("The validation set is empty")
 
     si = map_to_idx_by_nearest(states_centers, Xv)
     sj = map_to_idx_by_nearest(states_centers, Yv)
@@ -124,12 +125,16 @@ def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5), ece_b
     topk_acc = {}
     for k in topk_list:
         k = min(k, P.shape[1])
-        hit = np.any(order[:, :k] == sj[:, None], axis=1)  # 修复广播
+        hit = np.any(order[:, :k] == sj[:, None], axis=1)
         topk_acc[k] = float(np.mean(hit))
 
+    # === 数值预测(期望) ===
     exp_y = (P[si] * states_centers.reshape(1,-1)).sum(axis=1)
     rmse = float(np.sqrt(np.mean((exp_y - Yv)**2)))
     mae  = float(np.mean(np.abs(exp_y - Yv)))
+
+    # === 新增：容差准确率 ===
+    tol_acc = float(np.mean(np.abs(exp_y - Yv) <= tol))
 
     probs = np.clip(P[si], eps, 1.0)
     entropy = float(np.mean(-(probs*np.log(probs)).sum(axis=1)))
@@ -157,9 +162,11 @@ def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5), ece_b
         "Topk": topk_acc,
         "Exp_RMSE": rmse,
         "Exp_MAE": mae,
+        "TolAcc": tol_acc,              # <-- 新增
         "Entropy_mean": entropy,
         "ECE_top1": ece,
     }
+
 
 def brief(name, r):
     print(f"\n== {name} ==")
@@ -168,49 +175,57 @@ def brief(name, r):
     print(f"Brier (mean)      : {r['Brier_mean']:.6f}")
     print("Top-k 命中        : " + ", ".join([f"@{k}={r['Topk'][k]:.3f}" for k in sorted(r['Topk'])]))
     print(f"期望预测 RMSE/MAE : {r['Exp_RMSE']:.3f} / {r['Exp_MAE']:.3f}")
+    print(f"容差准确率(|err|≤{TOL:g}) : {r['TolAcc']:.3f}")   # <-- 新增
     print(f"平均熵(锐度)      : {r['Entropy_mean']:.3f}")
     print(f"ECE(top1)         : {r['ECE_top1']:.3f}")
 
+
 def main():
-    # 读数据 & 切分
+    # Read data & split
     seq = load_sequence(FILE_PATH)
     X, Y = seq[:-1], seq[1:]
     split = int(len(X)*(1.0-VAL_RATIO))
     seq_train = seq[:split+1]
 
-    # 1) 传统频数法：用训练段构建（分箱+平滑）
+    # tradition
     P_trad, states_trad = dtmc_from_sequence(
         seq_train, n_bins=N_BINS, quantile_bins=QUANTILE_BINS, alpha=ALPHA_SMOOTH
     )
     P_trad = ensure_row_stochastic(P_trad)
-    edges = centers_to_edges(states_trad)  # 供 NN/高斯构建积分用
+    edges = centers_to_edges(states_trad)  # for NN
     print(f"[Trad] 状态数={len(states_trad)} | 行和范围=({P_trad.sum(1).min():.6f}, {P_trad.sum(1).max():.6f})")
 
-    # 2) NN+高斯：在“同一 states_trad”上构建
+    # NN
     model, xsc, ysc = load_model_and_scalers()
     P_gauss = build_gauss_on_states(model, xsc, ysc, seq_train, states_trad, edges)
     P_gauss = ensure_row_stochastic(P_gauss)
     print(f"[Gauss] 行和范围=({P_gauss.sum(1).min():.6f}, {P_gauss.sum(1).max():.6f})")
 
-    # 3) 评估（同一验证集，各自就地映射）
-    res_trad  = eval_metrics(P_trad,  states_trad, seq, val_ratio=VAL_RATIO,
-                             topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
+    # evaluate
+    # res_trad  = eval_metrics(P_trad,  states_trad, seq, val_ratio=VAL_RATIO,
+    #                          topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
+    # res_gauss = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
+    #                          topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
+    res_trad = eval_metrics(P_trad, states_trad, seq, val_ratio=VAL_RATIO,
+                            topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
     res_gauss = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
-                             topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
+                             topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
 
-    # 4) 打印
-    brief("传统频数 DTMC", res_trad)
-    brief("NN+高斯 DTMC", res_gauss)
+    # print
+    brief("Tradtional DTMC", res_trad)
+    brief("NN+Gauss DTMC", res_gauss)
 
-    # 5) 简易结论
+    # result
     def better(a, b, smaller=True):
         return "Trad" if ((a<b) if smaller else (a>b)) else "Gauss"
 
-    print("\n=== 小结 ===")
-    print(f"- 概率更对（NLL↓）：选 **{better(res_trad['NLL_mean'], res_gauss['NLL_mean'], smaller=True)}**")
-    print(f"- 点命中更好（Top-1↑）：选 **{'Trad' if res_trad['Topk'][1] > res_gauss['Topk'][1] else 'Gauss'}**")
-    print(f"- 期望误差更小（MAE↓）：选 **{better(res_trad['Exp_MAE'], res_gauss['Exp_MAE'], smaller=True)}**")
-    print(f"- 校准更好（ECE↓）：选 **{better(res_trad['ECE_top1'], res_gauss['ECE_top1'], smaller=True)}**")
+    print("\n=== Result ===")
+    print(f"- Probability of being right (NLL↓): Select **{better(res_trad['NLL_mean'], res_gauss['NLL_mean'], smaller=True)}**")
+    print(f"- Better hit (Top-1↑): Select **{'Trad' if res_trad['Topk'][1] > res_gauss['Topk'][1] else 'Gauss'}**")
+    print(f"- Smaller expected error (MAE↓): Select **{better(res_trad['Exp_MAE'], res_gauss['Exp_MAE'], smaller=True)}**")
+    print(f"- Better calibration (ECE↓): Select **{better(res_trad['ECE_top1'], res_gauss['ECE_top1'], smaller=True)}**")
+    print(f"- 容差准确率(|err|≤{TOL:g})↑: Select **{'Trad' if res_trad['TolAcc'] > res_gauss['TolAcc'] else 'Gauss'}**")
+
 
 if __name__ == "__main__":
     main()
