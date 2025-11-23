@@ -1,4 +1,5 @@
 # dtmc_compare.py
+# deleted
 # 对比两种 DTMC 构建方式：
 # 1) 传统频数法（可选分箱）
 # 2) 神经网络 + 高斯误差（离散化 CDF 差）
