@@ -1,6 +1,6 @@
-# grid_search_fixed_lr.py
-# 固定学习率(Adam lr=3e-4)的小网格：单点输入 x_t -> x_{t+1}
-# 评估：验证集原始尺度 MAE；保存最佳模型与 scaler
+# 用固定学习率 Adam(lr=3e-4)，对一堆结构超参数（宽度/深度/损失/batch size）做一个小网格搜索，
+# 用验证集上原始尺度的 MAE 来决定哪个模型最好，然后把“最好的模型 + scaler”存下来。
+
 
 import os
 import numpy as np
@@ -14,11 +14,12 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError, Huber
 from tensorflow.keras.metrics import MeanAbsoluteError
 from tensorflow.keras.regularizers import l2
+from tensorflow.keras.callbacks import EarlyStopping
 
 # ========= 配置 =========
 FILE_PATH   = r"C:\Users\LENOVO\Desktop\project\sequence.txt"
 VAL_RATIO   = 0.10
-EPOCHS      = 100              # 固定轮数，不早停
+EPOCHS      = 100              # 固定轮数
 SEED        = 42
 LR_FIXED    = 3e-4             # <<< 固定学习率（改这里）
 USE_RESIDUAL_SKIP = True       # 线性跳连：ŷ = a*x + b + g(x)
@@ -87,9 +88,11 @@ def main():
     X_va_raw, y_va_raw = X_raw[split:], y_raw[split:]
     print(f"训练样本: {len(X_tr_raw)}, 验证样本: {len(X_va_raw)}")
 
-    # 天真基线：y_{t+1} = x_t
-    naive_mae = float(np.mean(np.abs(X_va_raw - y_va_raw)))
-    print(f"[Baseline] Naive MAE (original): {naive_mae:.4f}")
+    # 随机
+    rand_pred = np.random.choice(y_tr_raw.flatten(), size=y_va_raw.shape)
+    random_mae = float(np.mean(np.abs(rand_pred - y_va_raw)))
+
+    print(f"[Baseline] Random-Sample MAE (original): {random_mae:.4f}")
 
     # 仅用训练集拟合 scaler（防泄漏）
     x_scaler = MinMaxScaler()
@@ -111,6 +114,7 @@ def main():
     best_mae = float("inf")
     best_cfg = None
     results = []
+    early = EarlyStopping(monitor="val_loss",patience=10,restore_best_weights=True)
 
     for i, (w, d, ln, bs) in enumerate(combos, 1):
         model = build_model(width=w, depth=d, loss_name=ln,
@@ -121,7 +125,8 @@ def main():
             epochs=EPOCHS,
             batch_size=bs,
             shuffle=False,
-            verbose=0
+            verbose=0,
+            callbacks=[early],
         )
 
         # 验证集原始尺度 MAE（主指标）
@@ -136,9 +141,6 @@ def main():
         if mae_orig < best_mae:
             best_mae = mae_orig
             best_cfg = {"width": w, "depth": d, "loss": ln, "batch": bs}
-            model.save("best_grid_model_fixedlr.h5")
-            joblib.dump(x_scaler, "best_x_scaler.pkl")
-            joblib.dump(y_scaler, "best_y_scaler.pkl")
 
         # 记录
         results.append({
@@ -159,8 +161,7 @@ def main():
     print("\n=== 最佳配置（固定 lr） ===")
     print(f"Val MAE(orig)={best_mae:.4f} | "
           f"w={best_cfg['width']}, d={best_cfg['depth']}, loss={best_cfg['loss']}, bs={best_cfg['batch']}")
-    print("已保存：best_grid_model_fixedlr.h5, best_x_scaler.pkl, best_y_scaler.pkl")
-    print(f"[Baseline] Naive MAE (original): {naive_mae:.4f}")
+    print(f"[Baseline] random (original): {random_mae:.4f}")
 
 if __name__ == "__main__":
     main()

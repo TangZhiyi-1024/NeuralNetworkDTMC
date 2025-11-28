@@ -3,13 +3,12 @@
 
 import os, numpy as np
 from scipy.stats import norm
-
+from tensorflow.keras.models import load_model
+import joblib
+from tradition import dtmc_from_sequence   # return (P_trad, states_trad)
 FILE_PATH     = r"C:\Users\LENOVO\Desktop\project\sequence_complete.txt"
 
-from tradition import dtmc_from_sequence   # return (P_trad, states_trad)
-
 # NN and scaler
-MODEL_PATH    = "sequence_model.h5"
 X_SCALER_PATH = "x_scaler.pkl"
 Y_SCALER_PATH = "y_scaler.pkl"
 
@@ -21,7 +20,7 @@ TOPK_LIST     = [1, 3, 5]
 ECE_BINS      = 10
 EPS           = 1e-12
 BATCH_PRED    = 4096
-TOL = 100.0   # <=100 视为识别正确
+TOL = 200.0   # <=200 视为识别正确
 
 
 
@@ -35,13 +34,13 @@ def load_sequence(path):
     if xs.size<3: raise ValueError("sequence too short")
     return xs
 
-def load_model_and_scalers():
-    from tensorflow.keras.models import load_model
-    import joblib
-    model = load_model(MODEL_PATH, compile=False)
-    xsc = joblib.load(X_SCALER_PATH)
-    ysc = joblib.load(Y_SCALER_PATH)
+
+def load_model_and_scalers(model_path, x_scaler_path, y_scaler_path):
+    model = load_model(model_path, compile=False)
+    xsc = joblib.load(x_scaler_path)
+    ysc = joblib.load(y_scaler_path)
     return model, xsc, ysc
+
 
 def centers_to_edges(centers):
     c = np.asarray(centers, dtype=np.float64)
@@ -179,7 +178,6 @@ def brief(name, r):
     print(f"平均熵(锐度)      : {r['Entropy_mean']:.3f}")
     print(f"ECE(top1)         : {r['ECE_top1']:.3f}")
 
-
 def main():
     # Read data & split
     seq = load_sequence(FILE_PATH)
@@ -187,44 +185,79 @@ def main():
     split = int(len(X)*(1.0-VAL_RATIO))
     seq_train = seq[:split+1]
 
-    # tradition
+    # tradition DTMC (只算一次)
     P_trad, states_trad = dtmc_from_sequence(
         seq_train, n_bins=N_BINS, quantile_bins=QUANTILE_BINS, alpha=ALPHA_SMOOTH
     )
     P_trad = ensure_row_stochastic(P_trad)
-    edges = centers_to_edges(states_trad)  # for NN
+    edges = centers_to_edges(states_trad)
     print(f"[Trad] 状态数={len(states_trad)} | 行和范围=({P_trad.sum(1).min():.6f}, {P_trad.sum(1).max():.6f})")
 
-    # NN
-    model, xsc, ysc = load_model_and_scalers()
-    P_gauss = build_gauss_on_states(model, xsc, ysc, seq_train, states_trad, edges)
-    P_gauss = ensure_row_stochastic(P_gauss)
-    print(f"[Gauss] 行和范围=({P_gauss.sum(1).min():.6f}, {P_gauss.sum(1).max():.6f})")
+    # 多个模型
+    MODEL_SPECS = [
+        {
+            "name": "NN_base",
+            "model": "sequence_model.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+        {
+            "name": "NN_v1",
+            "model": "sequence_model_1.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+        {
+            "name": "NN_v2",
+            "model": "sequence_model_2.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+        {
+            "name": "NN_v3",
+            "model": "sequence_model_3.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+        {
+            "name": "NN_v4",
+            "model": "sequence_model_4.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+        {
+            "name": "NN_v5",
+            "model": "sequence_model_5.h5",
+            "xsc": "x_scaler.pkl",
+            "ysc": "y_scaler.pkl",
+        },
+    ]
 
-    # evaluate
-    # res_trad  = eval_metrics(P_trad,  states_trad, seq, val_ratio=VAL_RATIO,
-    #                          topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
-    # res_gauss = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
-    #                          topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS)
+    # evaluate Trad 作为 baseline
     res_trad = eval_metrics(P_trad, states_trad, seq, val_ratio=VAL_RATIO,
                             topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
-    res_gauss = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
-                             topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
 
-    # print
-    brief("Tradtional DTMC", res_trad)
-    brief("NN+Gauss DTMC", res_gauss)
+    results = [("Traditional DTMC", res_trad)]
 
-    # result
-    def better(a, b, smaller=True):
-        return "Trad" if ((a<b) if smaller else (a>b)) else "Gauss"
+    # ==== 对每个 NN 模型构建 Gauss DTMC 并评估 ====
+    for spec in MODEL_SPECS:
+        model, xsc, ysc = load_model_and_scalers(spec["model"], spec["xsc"], spec["ysc"])
+        P_gauss = build_gauss_on_states(model, xsc, ysc, seq_train, states_trad, edges)
+        P_gauss = ensure_row_stochastic(P_gauss)
+        print(f"[{spec['name']}] 行和范围=({P_gauss.sum(1).min():.6f}, {P_gauss.sum(1).max():.6f})")
 
-    print("\n=== Result ===")
-    print(f"- Probability of being right (NLL↓): Select **{better(res_trad['NLL_mean'], res_gauss['NLL_mean'], smaller=True)}**")
-    print(f"- Better hit (Top-1↑): Select **{'Trad' if res_trad['Topk'][1] > res_gauss['Topk'][1] else 'Gauss'}**")
-    print(f"- Smaller expected error (MAE↓): Select **{better(res_trad['Exp_MAE'], res_gauss['Exp_MAE'], smaller=True)}**")
-    print(f"- Better calibration (ECE↓): Select **{better(res_trad['ECE_top1'], res_gauss['ECE_top1'], smaller=True)}**")
-    print(f"- 容差准确率(|err|≤{TOL:g})↑: Select **{'Trad' if res_trad['TolAcc'] > res_gauss['TolAcc'] else 'Gauss'}**")
+        res = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
+                           topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
+        results.append((spec["name"] + "+Gauss DTMC", res))
+
+    for name, r in results:
+        brief(name, r)
+
+    # ==== 汇总对比（按 TolAcc / MAE 排序）====
+    print("\n=== Summary (sorted by TolAcc desc) ===")
+    results_sorted = sorted(results, key=lambda x: x[1]["TolAcc"], reverse=True)
+    for name, r in results_sorted:
+        print(f"{name:20s} | TolAcc={r['TolAcc']:.4f} | MAE={r['Exp_MAE']:.1f} | Top1={r['Topk'][1]:.3f} | NLL={r['NLL_mean']:.3f}")
 
 
 if __name__ == "__main__":

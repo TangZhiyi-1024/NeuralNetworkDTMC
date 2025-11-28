@@ -4,7 +4,10 @@ from tensorflow.keras.layers import Dense, Input
 from sklearn.preprocessing import MinMaxScaler
 import joblib
 from scipy.stats import norm
+from tensorflow.keras.callbacks import EarlyStopping,ReduceLROnPlateau
+from tensorflow.keras.losses import Huber
 
+MODEL = 'sequence_model_1.h5'
 
 
 # ====================
@@ -37,16 +40,32 @@ def train_and_save_model():
     # Create neural network model
     model = Sequential([
         Input(shape=(1,)),  # Input layer
-        Dense(64, activation='relu'),  # Hidden layer 1
-        Dense(64, activation='relu'),  # Hidden layer 2
+        Dense(32, activation='relu'),  # Hidden layer 1
+        Dense(32, activation='relu'),  # Hidden layer 2
         Dense(1)  # Output layer (regression)
     ])
-    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    model.compile(optimizer='adam',
+                  loss='mse',
+                  # loss=Huber(delta=0.02),
+                  metrics=['mae'])
 
     # Train model
     split = int(len(X) * 0.9)
     X_train, y_train = X[:split], y[:split]
     X_val, y_val = X[split:], y[split:]
+
+    early = EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        restore_best_weights=True
+    )
+
+    rlr = ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6
+    )
 
     history = model.fit(
         X_train, y_train,
@@ -54,12 +73,13 @@ def train_and_save_model():
         epochs=100,
         batch_size=8,
         shuffle=False,  # important
+        callbacks=[early,rlr],
         verbose=1
     )
     print(f"\nMAE: {history.history['mae'][-1]:.4f}")
 
     # Save model and scalers for later use
-    model.save('sequence_model.h5')
+    model.save(MODEL)
     joblib.dump(x_scaler, 'x_scaler.pkl')
     joblib.dump(y_scaler, 'y_scaler.pkl')
     print("Model and scalers saved successfully")
@@ -185,12 +205,12 @@ def main():
     # Try to load existing model or train new one
     try:
         # Load pre-trained model and scalers
-        model = load_model('sequence_model.h5')
+        model = load_model(MODEL)
         x_scaler = joblib.load('x_scaler.pkl')
         y_scaler = joblib.load('y_scaler.pkl')
 
         # Reload sequence data
-        file_path = r"C:\Users\LENOVO\Desktop\project\Sequence - complete.txt"
+        file_path = r"C:\Users\LENOVO\Desktop\project\Sequence.txt"
         sequence = []
         with open(file_path, 'r') as f:
             for line in f:
@@ -200,7 +220,7 @@ def main():
         print("Loaded existing model and data")
     except:
         print("Training new model...")
-        model, x_scaler, y_scaler, sequence = train_and_save_model()
+        # model, x_scaler, y_scaler, sequence = train_and_save_model()
 
     # Convert neural network to DTMC
     print("\nBuilding DTMC transition matrix...")
@@ -225,11 +245,6 @@ def main():
         pred = int(round(pred_original))
         print(f"input {val} → predict: {pred}")
 
-    # # Test predictions
-    # print("\nTesting predictions:")
-    # test_values = [3155, 3143, 3, 3127, 4669, 2501]
-    # for val in test_values:
-    #     predict_next(val)
 
 
 if __name__ == "__main__":
