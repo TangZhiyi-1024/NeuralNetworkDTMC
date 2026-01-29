@@ -2,7 +2,6 @@ import numpy as np
 
 def dtmc_from_sequence(sequence, n_bins=None, quantile_bins=False, alpha=0.0):
     seq = np.asarray(sequence)
-
     if n_bins is None:
         states = np.unique(seq)
         S = len(states)
@@ -35,6 +34,11 @@ def dtmc_from_sequence(sequence, n_bins=None, quantile_bins=False, alpha=0.0):
             counts[b[i], b[i+1]] += 1
 
     probs = counts.astype(np.float64)
+    # print("edges:", edges)
+    # print("states:", states)
+    # print("bin usage:", np.bincount(b, minlength=S))
+    # print("row sums:", counts.sum(axis=1))
+
     if alpha > 0:
         probs += alpha
 

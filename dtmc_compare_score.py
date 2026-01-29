@@ -6,19 +6,21 @@ from scipy.stats import norm
 from tensorflow.keras.models import load_model
 import joblib
 from tradition import dtmc_from_sequence   # return (P_trad, states_trad)
+from debug import debug_validation_predictions
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SEQ_DIR = os.path.join(BASE_DIR, "Sequence")
 MODEL_DIR = os.path.join(BASE_DIR, "Model_and_Scaler")
 DTMC_DIR = os.path.join(BASE_DIR, "DTMC")
 
-SEQ_FILE = os.path.join(SEQ_DIR, "sequence_complete.txt")
+SEQ_FILE = os.path.join(SEQ_DIR, "toy.txt")
+# SEQ_FILE = os.path.join(SEQ_DIR, "sequence_complete.txt")
 X_SCALER_FILE = os.path.join(MODEL_DIR, "x_scaler.pkl")
 Y_SCALER_FILE = os.path.join(MODEL_DIR, "y_scaler.pkl")
 
 
 VAL_RATIO     = 0.10        # validation: 10%
-N_BINS        = 128         # Number of bins for traditional methods
+N_BINS        = 3         # Number of bins for traditional methods
 QUANTILE_BINS = True
 ALPHA_SMOOTH  = 1.0
 TOPK_LIST     = [1, 3, 5]
@@ -37,6 +39,7 @@ def load_sequence(path):
             if s: xs.append(float(s))
     xs=np.asarray(xs,dtype=np.float64)
     if xs.size<3: raise ValueError("sequence too short")
+    # print(xs)
     return xs
 
 
@@ -118,6 +121,8 @@ def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5),
 
     si = map_to_idx_by_nearest(states_centers, Xv)
     sj = map_to_idx_by_nearest(states_centers, Yv)
+    # print(si)
+    # print(sj)
 
     p_true = np.clip(P[si, sj], eps, 1.0)
     nll_mean = -float(np.mean(np.log(p_true)))
@@ -131,6 +136,7 @@ def eval_metrics(P, states_centers, seq, val_ratio=0.1, topk_list=(1,3,5),
         k = min(k, P.shape[1])
         hit = np.any(order[:, :k] == sj[:, None], axis=1)
         topk_acc[k] = float(np.mean(hit))
+
 
 
     exp_y = (P[si] * states_centers.reshape(1,-1)).sum(axis=1)
@@ -192,17 +198,26 @@ def main():
     seq_train = seq[:split+1]
 
     # tradition DTMC (
-    P_trad, states_trad = dtmc_from_sequence(
-        seq_train, n_bins=N_BINS, quantile_bins=QUANTILE_BINS, alpha=ALPHA_SMOOTH
+    states = np.unique(seq)
+    num_unique = len(states)
+    P_trad, states_trad= dtmc_from_sequence(
+        seq_train, n_bins=None if num_unique < 32 else N_BINS, quantile_bins=QUANTILE_BINS, alpha=ALPHA_SMOOTH
     )
     P_trad = ensure_row_stochastic(P_trad)
-    edges = centers_to_edges(states_trad)
+    # edges = centers_to_edges(states_trad)
     print(f"[Trad] Number of states={len(states_trad)} | range of row sums=({P_trad.sum(1).min():.6f}, {P_trad.sum(1).max():.6f})")
 
     # save trad dtmc
     np.save(os.path.join(DTMC_DIR, "P_trad.npy"), P_trad)
     np.save(os.path.join(DTMC_DIR, "states_trad.npy"), states_trad)
     print(f"Saved Traditional DTMC to {DTMC_DIR}")
+
+    # debug_validation_predictions(
+    #     P_trad,
+    #     states_trad,
+    #     seq,
+    #     val_ratio=VAL_RATIO,
+    # )
 
     MODEL_SPECS = [
         {
@@ -252,7 +267,11 @@ def main():
     # Build and evaluate Gauss DTMC for each NN model.
     for spec in MODEL_SPECS:
         model, xsc, ysc = load_model_and_scalers(spec["model"], spec["xsc"], spec["ysc"])
-        P_gauss = build_gauss_on_states(model, xsc, ysc, seq_train, states_trad, edges)
+        P_g, states_g = dtmc_from_sequence(
+            seq_train, n_bins=N_BINS, quantile_bins=QUANTILE_BINS, alpha=ALPHA_SMOOTH
+        )
+        edges_g = centers_to_edges(states_trad)
+        P_gauss = build_gauss_on_states(model, xsc, ysc, seq_train, states_g, edges_g)
         P_gauss = ensure_row_stochastic(P_gauss)
         print(f"[{spec['name']}] range of row sums =({P_gauss.sum(1).min():.6f}, {P_gauss.sum(1).max():.6f})")
 
@@ -264,6 +283,12 @@ def main():
         res = eval_metrics(P_gauss, states_trad, seq, val_ratio=VAL_RATIO,
                            topk_list=TOPK_LIST, ece_bins=ECE_BINS, eps=EPS, tol=TOL)
         results.append((spec["name"] + "+Gauss DTMC", res))
+        # debug_validation_predictions(
+        #     P_gauss,
+        #     states_g,
+        #     seq,
+        #     val_ratio=VAL_RATIO,
+        # )
 
     for name, r in results:
         brief(name, r)
